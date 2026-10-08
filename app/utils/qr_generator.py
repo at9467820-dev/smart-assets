@@ -90,6 +90,8 @@ def generate_bulk_qr_pdf(assets, base_url: str = "") -> BytesIO:
         qr = qrcode.QRCode(version=1, box_size=8, border=2)
         qr.add_data(qr_url)
         qr.make(fit=True)
+        img = qr.make_image(fill_color="#12203D", back_color="white")
+        img_buffer = BytesIO()
         qr_pil = img.get_image() if hasattr(img, "get_image") else getattr(img, "_img", img)
         qr_pil.save(img_buffer, "PNG")
         img_buffer.seek(0)

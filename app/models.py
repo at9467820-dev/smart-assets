@@ -131,9 +131,18 @@ class Asset(db.Model):
     assigned_to = db.relationship("User", foreign_keys=[assigned_to_id])
     maintenance_logs = db.relationship("MaintenanceLog", back_populates="asset", lazy="dynamic", cascade="all, delete-orphan")
     allocation_history = db.relationship("AllocationHistory", back_populates="asset", lazy="dynamic", cascade="all, delete-orphan")
+    issues = db.relationship("AssetIssue", back_populates="asset", lazy="dynamic", cascade="all, delete-orphan", order_by="desc(AssetIssue.issue_date)")
 
     def __repr__(self):
         return f"<Asset {self.asset_tag}: {self.name}>"
+
+    @property
+    def current_issue(self):
+        return self.issues.filter_by(status="issued").first()
+
+    @property
+    def is_currently_issued(self):
+        return self.current_issue is not None
 
     @property
     def age_years(self):
@@ -180,6 +189,8 @@ class Asset(db.Model):
 
     @property
     def status_label(self):
+        if self.is_currently_issued:
+            return "Issued (Out)"
         labels = {
             "active": "Active",
             "under_repair": "Under Repair",
@@ -190,6 +201,8 @@ class Asset(db.Model):
 
     @property
     def status_badge_class(self):
+        if self.is_currently_issued:
+            return "badge-info"
         classes = {
             "active": "badge-success",
             "under_repair": "badge-warning",
@@ -242,6 +255,150 @@ class MaintenanceLog(db.Model):
         if self.status in ("pending", "in_progress") and self.scheduled_date:
             return date.today() > self.scheduled_date
         return False
+
+
+# ─────────────────────────────────────────────────────────────
+# AssetIssue (Material & Asset Issue / Slip / Gate Pass / Parchi)
+# ─────────────────────────────────────────────────────────────
+class AssetIssue(db.Model):
+    __tablename__ = "asset_issues"
+
+    id = db.Column(db.Integer, primary_key=True)
+    slip_number = db.Column(db.String(50), nullable=False, unique=True, index=True)
+    asset_id = db.Column(db.Integer, db.ForeignKey("assets.id"), nullable=False)
+    
+    # Issuer Details (Staff/Admin who issued)
+    issued_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    issuer_name = db.Column(db.String(150))
+    
+    # Receiver Details (Person getting the material/asset)
+    issued_to_name = db.Column(db.String(150), nullable=False)
+    issued_to_id_number = db.Column(db.String(50))  # Roll No / Emp ID
+    issued_to_dept = db.Column(db.String(120))
+    issued_to_phone = db.Column(db.String(30))
+    issued_to_email = db.Column(db.String(150))
+    
+    # Purpose & Authorization
+    purpose = db.Column(db.String(300), nullable=False)
+    gate_pass_type = db.Column(
+        db.Enum("returnable", "non_returnable", name="gate_pass_types"),
+        default="returnable",
+        nullable=False,
+    )
+    
+    # Timestamps
+    issue_date = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+    expected_return_date = db.Column(db.DateTime, nullable=True)
+    actual_return_date = db.Column(db.DateTime, nullable=True)
+    
+    # Status & Conditions
+    status = db.Column(
+        db.Enum("issued", "returned", "overdue", "damaged_returned", name="issue_statuses"),
+        default="issued",
+        nullable=False,
+    )
+    issue_condition = db.Column(db.String(100), default="Good / Functional")
+    return_condition = db.Column(db.String(100), nullable=True)
+    
+    # Return Receiver
+    received_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    
+    # Notes & Fines
+    remarks_on_issue = db.Column(db.Text)
+    remarks_on_return = db.Column(db.Text)
+    fine_amount = db.Column(db.Numeric(10, 2), default=0.00)
+    
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    asset = db.relationship("Asset", back_populates="issues")
+    issued_by = db.relationship("User", foreign_keys=[issued_by_id])
+    received_by = db.relationship("User", foreign_keys=[received_by_id])
+
+    def __repr__(self):
+        return f"<AssetIssue #{self.slip_number} [{self.status}]>"
+
+    @property
+    def is_overdue(self):
+        if self.status == "issued" and self.expected_return_date:
+            return datetime.utcnow() > self.expected_return_date
+        return False
+
+    @property
+    def status_label(self):
+        if self.is_overdue and self.status == "issued":
+            return "Overdue"
+        labels = {
+            "issued": "Issued (Active)",
+            "returned": "Returned",
+            "overdue": "Overdue",
+            "damaged_returned": "Returned with Damage",
+        }
+        return labels.get(self.status, self.status)
+
+    @property
+    def status_badge_class(self):
+        if self.is_overdue and self.status == "issued":
+            return "badge-danger"
+        classes = {
+            "issued": "badge-info",
+            "returned": "badge-success",
+            "overdue": "badge-danger",
+            "damaged_returned": "badge-warning",
+        }
+        return classes.get(self.status, "badge-secondary")
+
+
+# ─────────────────────────────────────────────────────────────
+# AssetOrder (Procurement Requisition / Material Order)
+# ─────────────────────────────────────────────────────────────
+class AssetOrder(db.Model):
+    __tablename__ = "asset_orders"
+
+    id = db.Column(db.Integer, primary_key=True)
+    order_number = db.Column(db.String(50), nullable=False, unique=True, index=True)
+    item_name = db.Column(db.String(200), nullable=False)
+    category = db.Column(db.String(100), default="Other")
+    department_id = db.Column(db.Integer, db.ForeignKey("departments.id"), nullable=False)
+    requested_by_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False)
+    quantity = db.Column(db.Integer, default=1, nullable=False)
+    estimated_unit_cost = db.Column(db.Numeric(12, 2), default=0.00)
+    total_cost = db.Column(db.Numeric(12, 2), default=0.00)
+    priority = db.Column(
+        db.Enum("low", "medium", "high", "critical", name="order_priorities"),
+        default="medium",
+    )
+    status = db.Column(
+        db.Enum("pending", "approved", "ordered", "received", "cancelled", name="order_statuses"),
+        default="pending",
+        nullable=False,
+    )
+    supplier_name = db.Column(db.String(150))
+    justification = db.Column(db.Text)
+    specs_notes = db.Column(db.Text)
+    order_date = db.Column(db.Date, default=date.today)
+    delivery_date = db.Column(db.Date, nullable=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    department = db.relationship("Department")
+    requested_by = db.relationship("User", foreign_keys=[requested_by_id])
+
+    def __repr__(self):
+        return f"<AssetOrder #{self.order_number} [{self.status}]>"
+
+    @property
+    def status_badge_class(self):
+        classes = {
+            "pending": "badge-warning",
+            "approved": "badge-info",
+            "ordered": "badge-primary",
+            "received": "badge-success",
+            "cancelled": "badge-secondary",
+        }
+        return classes.get(self.status, "badge-secondary")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -329,3 +486,4 @@ class ActivityLog(db.Model):
 
     def __repr__(self):
         return f"<ActivityLog {self.action} on {self.entity_type}#{self.entity_id}>"
+

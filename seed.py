@@ -15,6 +15,13 @@ import sys
 from datetime import date, timedelta
 import random
 
+# Ensure UTF-8 output on Windows console
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Ensure app module is importable
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 
@@ -24,7 +31,8 @@ load_dotenv()
 from app import create_app
 from app.extensions import db
 from app.models import (
-    Department, User, Asset, MaintenanceLog, AllocationHistory, BudgetEstimate, ActivityLog
+    Department, User, Asset, MaintenanceLog, AllocationHistory, BudgetEstimate, ActivityLog,
+    AssetIssue, AssetOrder
 )
 
 app = create_app("development")
@@ -284,6 +292,115 @@ def seed():
             )
             db.session.add(est)
 
+        # ── Material Issues & Gate Passes (Parchi) ────────────────
+        print("🎫 Seeding material issues & gate passes (parchi)…")
+        from datetime import datetime
+        now = datetime.utcnow()
+        sample_issues = [
+            # Active Issue 1 (CSE Laptop)
+            AssetIssue(
+                slip_number="GP-2026-0001",
+                asset_id=created_assets[1][0].id,
+                issued_by_id=cse_staff.id,
+                issuer_name="Vijay Krishnamurthy",
+                issued_to_name="Ananya Sen",
+                issued_to_id_number="CS-2023-014",
+                issued_to_dept="CSE 4th Year",
+                issued_to_phone="+91 98450 11223",
+                issued_to_email="ananya.sen@assetpulse.ac.in",
+                purpose="Final Year Capstone Project ML Model Training",
+                gate_pass_type="returnable",
+                issue_date=now - timedelta(days=2, hours=3),
+                expected_return_date=now + timedelta(days=5),
+                issue_condition="Good / Functional",
+                status="issued",
+                remarks_on_issue="Issued with 65W original charger and laptop sleeve.",
+            ),
+            # Overdue Issue 2 (ECE Oscilloscope)
+            AssetIssue(
+                slip_number="GP-2026-0002",
+                asset_id=created_assets[10][0].id,
+                issued_by_id=ece_staff.id,
+                issuer_name="Lakshmi Menon",
+                issued_to_name="Karthik Rajan",
+                issued_to_id_number="EC-2022-088",
+                issued_to_dept="ECE Robotics Lab",
+                issued_to_phone="+91 97110 55443",
+                issued_to_email="karthik.r@assetpulse.ac.in",
+                purpose="Drone Flight Controller PCB Signal Analysis",
+                gate_pass_type="returnable",
+                issue_date=now - timedelta(days=8),
+                expected_return_date=now - timedelta(days=2),
+                issue_condition="Calibrated",
+                status="issued",
+                remarks_on_issue="BNC probe cables attached. Must be returned to Block B.",
+            ),
+            # Returned Issue 3 (Civil Total Station)
+            AssetIssue(
+                slip_number="GP-2026-0003",
+                asset_id=created_assets[20][0].id,
+                issued_by_id=admin.id,
+                issuer_name="System Administrator",
+                issued_to_name="Dr. Meena Sharma",
+                issued_to_id_number="FAC-CIVIL-04",
+                issued_to_dept="Civil Engineering",
+                issued_to_phone="+91 94433 22110",
+                issued_to_email="meena.sharma@assetpulse.ac.in",
+                purpose="Off-Campus Highway Survey Practical Training",
+                gate_pass_type="returnable",
+                issue_date=now - timedelta(days=20),
+                expected_return_date=now - timedelta(days=15),
+                actual_return_date=now - timedelta(days=14),
+                issue_condition="Good / Functional",
+                return_condition="Good / Functional",
+                received_by_id=admin.id,
+                status="returned",
+                remarks_on_issue="Total station with tripod and prism.",
+                remarks_on_return="Returned in perfect working condition. Cleaned and stored.",
+            ),
+        ]
+        for iss in sample_issues:
+            db.session.add(iss)
+
+        # ── Asset Orders & Procurement Requisitions ──────────────
+        print("📦 Seeding procurement orders…")
+        sample_orders = [
+            AssetOrder(
+                order_number="ORD-2026-0001",
+                item_name="NVIDIA RTX 4080 GPU Workstation",
+                category="Computer",
+                department_id=depts["CSE"].id,
+                requested_by_id=cse_staff.id,
+                quantity=2,
+                estimated_unit_cost=145000.00,
+                total_cost=290000.00,
+                priority="high",
+                status="approved",
+                supplier_name="Dell Commercial Enterprise",
+                justification="High performance GPU computing for AI & Machine Learning Research Lab.",
+                specs_notes="64GB DDR5 RAM, 2TB PCIe Gen4 SSD, 3-Year ProSupport Warranty.",
+                order_date=date.today() - timedelta(days=10),
+            ),
+            AssetOrder(
+                order_number="ORD-2026-0002",
+                item_name="Digital Storage Oscilloscope Probes (Pack of 10)",
+                category="Lab Equipment",
+                department_id=depts["ECE"].id,
+                requested_by_id=ece_staff.id,
+                quantity=5,
+                estimated_unit_cost=3500.00,
+                total_cost=17500.00,
+                priority="medium",
+                status="ordered",
+                supplier_name="Agilent Test Instruments",
+                justification="Consumable probe replacement for Semester 6 VLSI Lab sessions.",
+                specs_notes="100MHz 10X/1X attenuation switchable probes with ground clips.",
+                order_date=date.today() - timedelta(days=4),
+            ),
+        ]
+        for ord_item in sample_orders:
+            db.session.add(ord_item)
+
         db.session.commit()
 
         # ── Activity Logs ─────────────────────────────────────────
@@ -293,6 +410,7 @@ def seed():
             ("CREATE", "Asset", 1,         "Created asset CSE-001"),
             ("UPDATE", "Asset", 5,         "Updated status to under_repair"),
             ("CREATE", "MaintenanceLog", 1,"Maintenance request for CSE-006"),
+            ("ISSUE",  "AssetIssue", 1,    "Issued asset to Ananya Sen (Slip #GP-2026-0001)"),
             ("LOGIN",  "User",  cse_staff.id, "cse_staff logged in"),
         ]
         for action, entity_type, entity_id, desc in sample_actions:
@@ -310,6 +428,8 @@ def seed():
         print(f"   Departments : {Department.query.count()}")
         print(f"   Users       : {User.query.count()}")
         print(f"   Assets      : {Asset.query.count()}")
+        print(f"   Gate Passes : {AssetIssue.query.count()}")
+        print(f"   Orders      : {AssetOrder.query.count()}")
         print(f"   Maint. Logs : {MaintenanceLog.query.count()}")
         print(f"   Budgets     : {BudgetEstimate.query.count()}")
         print("\n🔑 Login Credentials:")
@@ -320,3 +440,4 @@ def seed():
 
 if __name__ == "__main__":
     seed()
+

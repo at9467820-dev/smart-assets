@@ -107,7 +107,13 @@ def detail(asset_id):
         .order_by(db.desc("created_at"))
         .all()
     )
-    timeline = _build_timeline(asset, maintenance_history, allocation_history)
+    issue_history = (
+        asset.issues
+        .order_by(db.desc("issue_date"))
+        .limit(15)
+        .all()
+    )
+    timeline = _build_timeline(asset, maintenance_history, allocation_history, issue_history)
 
     risk = compute_risk_score(asset)
     maint_cost = estimated_maintenance_cost(asset)
@@ -119,6 +125,7 @@ def detail(asset_id):
         asset=asset,
         maintenance_history=maintenance_history,
         allocation_history=allocation_history,
+        issue_history=issue_history,
         timeline=timeline,
         risk_score=risk,
         risk_label=risk_label(risk),
@@ -129,7 +136,7 @@ def detail(asset_id):
     )
 
 
-def _build_timeline(asset, maintenance_logs, allocation_history):
+def _build_timeline(asset, maintenance_logs, allocation_history, issue_history=None):
     """Build a unified timeline list for the asset lifecycle view."""
     events = []
     if asset.purchase_date:
@@ -159,8 +166,56 @@ def _build_timeline(asset, maintenance_logs, allocation_history):
             "title": f"Maintenance ({log.status.replace('_', ' ').title()})",
             "desc": (log.issue_description or "")[:60],
         })
+    if issue_history:
+        for iss in issue_history:
+            events.append({
+                "date": iss.issue_date.date() if iss.issue_date else date.today(),
+                "type": "issue",
+                "icon": "bi-person-badge-fill",
+                "color": "primary",
+                "title": f"Issued to {iss.issued_to_name} (Gate Pass #{iss.slip_number})",
+                "desc": f"Purpose: {iss.purpose} • Issuer: {iss.issuer_name or 'Staff'}",
+            })
+            if iss.actual_return_date:
+                events.append({
+                    "date": iss.actual_return_date.date(),
+                    "type": "return",
+                    "icon": "bi-check2-circle",
+                    "color": "success",
+                    "title": f"Returned by {iss.issued_to_name}",
+                    "desc": f"Condition: {iss.return_condition or 'Good'}",
+                })
     events.sort(key=lambda e: e["date"] or date.min, reverse=True)
     return events
+
+
+# ─────────────────────────────────────────────────────────────
+# Smart QR Scan Action Handler
+# ─────────────────────────────────────────────────────────────
+@assets_bp.route("/scan-action/<path:identifier>")
+@login_required
+def scan_action(identifier):
+    """
+    Handle scanned QR codes — lookup asset by tag, numeric ID or URL,
+    and open the Smart Quick Action hub.
+    """
+    identifier = identifier.strip().strip("/")
+    asset = None
+
+    if identifier.isdigit():
+        asset = Asset.query.get(int(identifier))
+    if not asset:
+        asset = Asset.query.filter(Asset.asset_tag.ilike(identifier)).first()
+    if not asset and "assets/" in identifier:
+        part = identifier.split("assets/")[-1].split("/")[0].split("?")[0]
+        if part.isdigit():
+            asset = Asset.query.get(int(part))
+
+    if not asset:
+        flash(f"No asset found matching '{identifier}'.", "warning")
+        return redirect(url_for("assets.scanner"))
+
+    return redirect(url_for("assets.detail", asset_id=asset.id))
 
 
 # ─────────────────────────────────────────────────────────────

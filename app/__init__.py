@@ -46,6 +46,8 @@ def create_app(config_name: str = None) -> Flask:
     from app.blueprints.dashboard import dashboard_bp
     from app.blueprints.assets import assets_bp
     from app.blueprints.maintenance import maintenance_bp
+    from app.blueprints.issues import issues_bp
+    from app.blueprints.orders import orders_bp
     from app.blueprints.budget import budget_bp
     from app.blueprints.reports import reports_bp
     from app.blueprints.allocations import allocations_bp
@@ -56,6 +58,8 @@ def create_app(config_name: str = None) -> Flask:
     app.register_blueprint(dashboard_bp)
     app.register_blueprint(assets_bp, url_prefix="/assets")
     app.register_blueprint(maintenance_bp, url_prefix="/maintenance")
+    app.register_blueprint(issues_bp, url_prefix="/issues")
+    app.register_blueprint(orders_bp, url_prefix="/orders")
     app.register_blueprint(budget_bp, url_prefix="/budget")
     app.register_blueprint(reports_bp, url_prefix="/reports")
     app.register_blueprint(allocations_bp, url_prefix="/allocations")
@@ -79,9 +83,10 @@ def create_app(config_name: str = None) -> Flask:
     @app.context_processor
     def inject_globals():
         from flask_login import current_user
-        from app.models import MaintenanceLog, Asset
+        from app.models import MaintenanceLog, Asset, AssetIssue
         from datetime import date, datetime
         alerts = 0
+        overdue_issues_count = 0
         if current_user.is_authenticated:
             # Overdue maintenance
             overdue = MaintenanceLog.query.filter(
@@ -93,7 +98,18 @@ def create_app(config_name: str = None) -> Flask:
                 Asset.warranty_expiry.isnot(None),
                 Asset.warranty_expiry <= date.today(),
             ).count()
-            alerts = overdue + expiring
-        return dict(global_alerts=alerts, now=datetime.now, today=date.today())
+            # Overdue asset issues / returns
+            overdue_issues_count = AssetIssue.query.filter(
+                AssetIssue.status == "issued",
+                AssetIssue.expected_return_date.isnot(None),
+                AssetIssue.expected_return_date < datetime.utcnow(),
+            ).count()
+            alerts = overdue + expiring + overdue_issues_count
+        return dict(
+            global_alerts=alerts,
+            overdue_issues_count=overdue_issues_count,
+            now=datetime.now,
+            today=date.today()
+        )
 
     return app
