@@ -2,13 +2,14 @@
 AssetPulse — Application Factory
 """
 import os
-from flask import Flask, render_template
+from flask import Flask, render_template, request
 from config import config_map
 from app.extensions import db, login_manager, migrate, mail
 
-# ── Resolve frontend paths (../../frontend relative to backend/app/) ──
+# ── Resolve frontend paths ──
 _BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
+_FRONTEND_DIST = os.path.join(_PROJECT_ROOT, "frontend", "dist")
 _FRONTEND_TEMPLATES = os.path.join(_PROJECT_ROOT, "frontend", "templates")
 _FRONTEND_STATIC = os.path.join(_PROJECT_ROOT, "frontend", "static")
 
@@ -17,11 +18,19 @@ def create_app(config_name: str = None) -> Flask:
     if config_name is None:
         config_name = os.environ.get("FLASK_ENV", "development")
 
-    app = Flask(
-        __name__,
-        template_folder=_FRONTEND_TEMPLATES,
-        static_folder=_FRONTEND_STATIC,
-    )
+    # Serve built React app if dist exists, else fallback to templates
+    if os.path.exists(_FRONTEND_DIST):
+        app = Flask(
+            __name__,
+            static_folder=_FRONTEND_DIST,
+            static_url_path="",
+        )
+    else:
+        app = Flask(
+            __name__,
+            template_folder=_FRONTEND_TEMPLATES,
+            static_folder=_FRONTEND_STATIC,
+        )
     app.config.from_object(config_map[config_name])
 
     # ── Ensure upload / QR directories exist ──────────────────
@@ -69,15 +78,38 @@ def create_app(config_name: str = None) -> Flask:
     # ── Error handlers ─────────────────────────────────────────
     @app.errorhandler(403)
     def forbidden(e):
-        return render_template("errors/403.html"), 403
+        if request.path.startswith("/api"):
+            return {"error": "Forbidden", "status_code": 403}, 403
+        try:
+            return render_template("errors/403.html"), 403
+        except Exception:
+            return {"error": "Forbidden"}, 403
 
     @app.errorhandler(404)
     def not_found(e):
-        return render_template("errors/404.html"), 404
+        if request.path.startswith("/api"):
+            return {"error": "Not Found", "status_code": 404}, 404
+        try:
+            return render_template("errors/404.html"), 404
+        except Exception:
+            return {"error": "Not Found"}, 404
 
     @app.errorhandler(500)
     def server_error(e):
-        return render_template("errors/500.html"), 500
+        if request.path.startswith("/api"):
+            return {"error": "Internal Server Error", "status_code": 500}, 500
+        try:
+            return render_template("errors/500.html"), 500
+        except Exception:
+            return {"error": "Internal Server Error"}, 500
+
+    # ── CORS Support for React SPA ─────────────────────────────
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
+        response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS,PATCH"
+        return response
 
     # ── Context processors ─────────────────────────────────────
     @app.context_processor
@@ -111,5 +143,17 @@ def create_app(config_name: str = None) -> Flask:
             now=datetime.now,
             today=date.today()
         )
+
+    # ── Serve Pure React SPA ───────────────────────────────────
+    if os.path.exists(_FRONTEND_DIST):
+        from flask import send_from_directory
+        @app.route("/", defaults={"path": ""})
+        @app.route("/<path:path>")
+        def serve_react(path):
+            if path.startswith("api/") or path.startswith("qrcodes/") or path.startswith("uploads/"):
+                return not_found(404)
+            if path != "" and os.path.exists(os.path.join(_FRONTEND_DIST, path)):
+                return send_from_directory(_FRONTEND_DIST, path)
+            return send_from_directory(_FRONTEND_DIST, "index.html")
 
     return app
