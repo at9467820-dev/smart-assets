@@ -46,11 +46,23 @@ class DevelopmentConfig(Config):
         _db_url = f"sqlite:///{os.path.join(BASE_DIR, _db_url[10:])}"
     SQLALCHEMY_DATABASE_URI = _db_url
 
+    # Auto-enable SSL connect_args for MySQL connections (e.g. Aiven Cloud)
+    _dev_engine_opts = dict(Config.SQLALCHEMY_ENGINE_OPTIONS)
+    if _db_url and "mysql" in _db_url:
+        _dev_engine_opts["connect_args"] = {"ssl": {}}
+    SQLALCHEMY_ENGINE_OPTIONS = _dev_engine_opts
+
 
 class ProductionConfig(Config):
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL")
+    _db_url = os.environ.get("DATABASE_URL")
+    SQLALCHEMY_DATABASE_URI = _db_url
     WTF_CSRF_ENABLED = True
+
+    _prod_engine_opts = dict(Config.SQLALCHEMY_ENGINE_OPTIONS)
+    if _db_url and "mysql" in _db_url:
+        _prod_engine_opts["connect_args"] = {"ssl": {}}
+    SQLALCHEMY_ENGINE_OPTIONS = _prod_engine_opts
 
 
 class TestingConfig(Config):
