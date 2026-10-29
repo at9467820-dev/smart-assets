@@ -2,7 +2,7 @@
 AssetPulse — Application Factory
 """
 import os
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify, Response
 from config import config_map
 from app.extensions import db, login_manager, migrate, mail
 
@@ -50,6 +50,18 @@ def create_app(config_name: str = None) -> Flask:
     def load_user(user_id):
         return User.query.get(int(user_id))
 
+    # ── Serve Pure React SPA (Priority Routing) ────────────────
+    if os.path.exists(_FRONTEND_DIST):
+        from flask import send_from_directory
+        @app.route("/", defaults={"path": ""})
+        @app.route("/<path:path>")
+        def serve_react(path):
+            if path.startswith("api/") or path.startswith("qrcodes/") or path.startswith("uploads/"):
+                return not_found(404)
+            if path != "" and os.path.exists(os.path.join(_FRONTEND_DIST, path)):
+                return send_from_directory(_FRONTEND_DIST, path)
+            return send_from_directory(_FRONTEND_DIST, "index.html")
+
     # ── Register Blueprints ────────────────────────────────────
     from app.blueprints.auth import auth_bp
     from app.blueprints.dashboard import dashboard_bp
@@ -75,11 +87,32 @@ def create_app(config_name: str = None) -> Flask:
     app.register_blueprint(analysis_bp, url_prefix="/analysis")
     app.register_blueprint(api_bp, url_prefix="/api")
 
-    # ── Error handlers ─────────────────────────────────────────
+    # ── CORS Support & Preflight for React SPA ─────────────────
+    @app.before_request
+    def handle_cors_preflight():
+        if request.method == "OPTIONS":
+            from flask import Response
+            response = Response()
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With,Accept"
+            response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS,PATCH"
+            response.headers["Access-Control-Max-Age"] = "86400"
+            return response
+
+    @app.after_request
+    def add_cors_headers(response):
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With,Accept"
+        response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS,PATCH"
+        return response
+
+    # ── Error handlers with Guaranteed CORS ────────────────────
     @app.errorhandler(403)
     def forbidden(e):
         if request.path.startswith("/api"):
-            return {"error": "Forbidden", "status_code": 403}, 403
+            resp = jsonify({"error": "Forbidden", "status_code": 403})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 403
         try:
             return render_template("errors/403.html"), 403
         except Exception:
@@ -88,28 +121,27 @@ def create_app(config_name: str = None) -> Flask:
     @app.errorhandler(404)
     def not_found(e):
         if request.path.startswith("/api"):
-            return {"error": "Not Found", "status_code": 404}, 404
+            resp = jsonify({"error": "Not Found", "status_code": 404})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            return resp, 404
         try:
             return render_template("errors/404.html"), 404
         except Exception:
             return {"error": "Not Found"}, 404
 
     @app.errorhandler(500)
+    @app.errorhandler(Exception)
     def server_error(e):
         if request.path.startswith("/api"):
-            return {"error": "Internal Server Error", "status_code": 500}, 500
+            resp = jsonify({"error": str(e) or "Internal Server Error", "status_code": 500})
+            resp.headers["Access-Control-Allow-Origin"] = "*"
+            resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With,Accept"
+            resp.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS,PATCH"
+            return resp, 500
         try:
             return render_template("errors/500.html"), 500
         except Exception:
             return {"error": "Internal Server Error"}, 500
-
-    # ── CORS Support for React SPA ─────────────────────────────
-    @app.after_request
-    def add_cors_headers(response):
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization,X-Requested-With"
-        response.headers["Access-Control-Allow-Methods"] = "GET,PUT,POST,DELETE,OPTIONS,PATCH"
-        return response
 
     # ── Context processors ─────────────────────────────────────
     @app.context_processor
@@ -143,17 +175,5 @@ def create_app(config_name: str = None) -> Flask:
             now=datetime.now,
             today=date.today()
         )
-
-    # ── Serve Pure React SPA ───────────────────────────────────
-    if os.path.exists(_FRONTEND_DIST):
-        from flask import send_from_directory
-        @app.route("/", defaults={"path": ""})
-        @app.route("/<path:path>")
-        def serve_react(path):
-            if path.startswith("api/") or path.startswith("qrcodes/") or path.startswith("uploads/"):
-                return not_found(404)
-            if path != "" and os.path.exists(os.path.join(_FRONTEND_DIST, path)):
-                return send_from_directory(_FRONTEND_DIST, path)
-            return send_from_directory(_FRONTEND_DIST, "index.html")
 
     return app

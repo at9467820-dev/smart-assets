@@ -10,7 +10,6 @@ from app.models import Asset, Department, MaintenanceLog, User, ActivityLog
 from app.extensions import db
 
 
-@dashboard_bp.route("/")
 @dashboard_bp.route("/dashboard")
 @login_required
 def index():

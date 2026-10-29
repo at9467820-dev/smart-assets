@@ -15,9 +15,10 @@ from app.models import (
 from app.extensions import db
 from app.utils.qr_generator import generate_asset_qr
 from app.utils.parchi_generator import generate_issue_parchi_pdf
+from sqlalchemy.orm import joinedload
 from app.utils.cost_estimator import (
     compute_risk_score, current_book_value, estimated_maintenance_cost,
-    estimated_replacement_cost, risk_label
+    estimated_replacement_cost, risk_label, USEFUL_LIFE
 )
 
 
@@ -120,7 +121,7 @@ def get_assets():
     department_id = request.args.get("department_id")
     status = request.args.get("status", "")
 
-    query = Asset.query
+    query = Asset.query.options(joinedload(Asset.department))
     if q:
         query = query.filter(
             or_(
@@ -138,8 +139,61 @@ def get_assets():
         query = query.filter(Asset.status == status)
 
     assets = query.order_by(desc(Asset.created_at)).all()
+    if not assets:
+        return jsonify({"assets": [], "count": 0})
+
+    # Batch pre-fetch active issues (1 query instead of 45+ queries)
+    active_issues = {
+        iss.asset_id: iss
+        for iss in AssetIssue.query.filter_by(status="issued").all()
+    }
+
+    # Batch pre-fetch maintenance counts (1 query)
+    repair_counts = dict(
+        db.session.query(MaintenanceLog.asset_id, func.count(MaintenanceLog.id))
+        .filter_by(status="resolved")
+        .group_by(MaintenanceLog.asset_id)
+        .all()
+    )
+
+    # Batch pre-fetch last completed service date (1 query)
+    last_services = dict(
+        db.session.query(MaintenanceLog.asset_id, func.max(MaintenanceLog.completed_date))
+        .filter_by(status="resolved")
+        .group_by(MaintenanceLog.asset_id)
+        .all()
+    )
+
+    today = date.today()
     results = []
     for a in assets:
+        curr_issue = active_issues.get(a.id)
+        r_count = repair_counts.get(a.id, 0)
+        last_d = last_services.get(a.id)
+
+        # In-memory risk score calculation (no N+1 SQL queries)
+        try:
+            life = USEFUL_LIFE.get(a.category, 8)
+            age = a.age_years
+            age_ratio = min(age / life, 1.5)
+            score = int(age_ratio * 35)
+
+            repairs_per_year = (r_count / max(age, 0.5)) if age > 0 else r_count
+            score += int(min(repairs_per_year * 10, 35))
+
+            if last_d:
+                clean_last = last_d.date() if hasattr(last_d, "date") else last_d
+                days = (today - clean_last).days
+            elif a.purchase_date:
+                clean_p = a.purchase_date.date() if hasattr(a.purchase_date, "date") else a.purchase_date
+                days = (today - clean_p).days
+            else:
+                days = 9999
+            score += int(min(max(days - 180, 0) / 360 * 30, 30))
+            risk_val = min(max(score, 0), 100)
+        except Exception:
+            risk_val = 25
+
         results.append({
             "id": a.id,
             "asset_tag": a.asset_tag,
@@ -156,21 +210,21 @@ def get_assets():
             "status_label": a.status_label,
             "status_badge_class": a.status_badge_class,
             "condition_rating": a.condition_rating or 5,
-            "is_currently_issued": a.is_currently_issued,
+            "is_currently_issued": curr_issue is not None,
             "current_issue": {
-                "id": a.current_issue.id,
-                "slip_number": a.current_issue.slip_number,
-                "issued_to_name": a.current_issue.issued_to_name,
-                "issued_to_dept": a.current_issue.issued_to_dept,
-                "expected_return_date": a.current_issue.expected_return_date.strftime("%Y-%m-%d %H:%M") if a.current_issue.expected_return_date else None,
-                "is_overdue": a.current_issue.is_overdue,
-            } if a.current_issue else None,
+                "id": curr_issue.id,
+                "slip_number": curr_issue.slip_number,
+                "issued_to_name": curr_issue.issued_to_name,
+                "issued_to_dept": curr_issue.issued_to_dept,
+                "expected_return_date": curr_issue.expected_return_date.strftime("%Y-%m-%d %H:%M") if curr_issue.expected_return_date else None,
+                "is_overdue": curr_issue.is_overdue,
+            } if curr_issue else None,
             "serial_number": a.serial_number or "",
             "manufacturer": a.manufacturer or "",
             "model_number": a.model_number or "",
             "qr_code_path": a.qr_code_path or "",
-            "risk_score": a.risk_score,
-            "risk_label": risk_label(a.risk_score),
+            "risk_score": risk_val,
+            "risk_label": risk_label(risk_val),
         })
 
     return jsonify({"assets": results, "count": len(results)})
@@ -657,6 +711,8 @@ def lookup_asset(identifier):
         asset = Asset.query.get(int(identifier))
     if not asset:
         asset = Asset.query.filter(Asset.asset_tag.ilike(identifier)).first()
+    if not asset:
+        asset = Asset.query.filter(Asset.serial_number.ilike(identifier)).first()
     if not asset and "assets/" in identifier:
         part = identifier.split("assets/")[-1].split("/")[0].split("?")[0]
         if part.isdigit():
@@ -672,10 +728,17 @@ def lookup_asset(identifier):
             "asset_tag": asset.asset_tag,
             "name": asset.name,
             "category": asset.category,
-            "department": asset.department.name if asset.department else "N/A",
+            "department": {"id": asset.department_id, "name": asset.department.name if asset.department else "N/A"},
+            "department_name": asset.department.name if asset.department else "N/A",
             "location": asset.location or "Lab",
             "status": asset.status,
             "status_label": asset.status_label,
+            "purchase_cost": float(asset.purchase_cost or 0),
+            "purchase_date": asset.purchase_date.strftime("%Y-%m-%d") if asset.purchase_date else None,
+            "warranty_expiry": asset.warranty_expiry.strftime("%Y-%m-%d") if asset.warranty_expiry else None,
+            "serial_number": asset.serial_number or "",
+            "model_number": asset.model_number or "",
+            "risk_score": asset.risk_score,
             "is_currently_issued": asset.is_currently_issued,
             "current_issue": {
                 "id": asset.current_issue.id,
