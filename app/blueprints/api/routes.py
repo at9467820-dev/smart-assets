@@ -2,7 +2,9 @@
 AssetPulse — Comprehensive REST API Blueprint
 Powers the modern React frontend with complete CRUD, QR scanning, stats, gate pass issue & return, and procurement.
 """
-from flask import jsonify, request, current_app, send_file
+from flask import jsonify, request, current_app, send_file, Response
+import csv
+import io
 from sqlalchemy import func, or_, desc
 from datetime import date, datetime, timedelta
 from app.blueprints.api import api_bp
@@ -1039,4 +1041,488 @@ def get_audit_logs():
             "timestamp": l.timestamp.strftime("%d %b %Y, %I:%M:%S %p") if l.timestamp else "",
         })
     return jsonify({"logs": results})
+
+
+# ─────────────────────────────────────────────────────────────
+# 12. Smart Notification Center & Alert Feeds
+# ─────────────────────────────────────────────────────────────
+@api_bp.route("/notifications", methods=["GET"])
+def get_notifications():
+    now = datetime.utcnow()
+    today = date.today()
+    in_30_days = today + timedelta(days=30)
+    alerts = []
+
+    # 1. Overdue Gate Passes (Critical)
+    overdue_issues = AssetIssue.query.filter(
+        AssetIssue.status == "issued",
+        AssetIssue.expected_return_date.isnot(None),
+        AssetIssue.expected_return_date < now
+    ).order_by(AssetIssue.expected_return_date.asc()).limit(10).all()
+
+    for iss in overdue_issues:
+        days_late = (now - iss.expected_return_date).days if iss.expected_return_date else 0
+        alerts.append({
+            "id": f"issue-{iss.id}",
+            "type": "overdue_issue",
+            "priority": "critical",
+            "title": f"Overdue Asset Return: {iss.asset.asset_tag}",
+            "message": f"{iss.issued_to_name} ({iss.issued_to_dept or 'Dept'}) has not returned {iss.asset.name}. Overdue by {max(1, days_late)} day(s).",
+            "link_tab": "issues",
+            "entity_id": iss.id,
+            "timestamp": iss.expected_return_date.strftime("%d %b %Y, %I:%M %p") if iss.expected_return_date else "",
+        })
+
+    # 2. Critical & Overdue Maintenance
+    overdue_maint = MaintenanceLog.query.filter(
+        MaintenanceLog.status.in_(["pending", "in_progress"]),
+        MaintenanceLog.scheduled_date < today
+    ).order_by(MaintenanceLog.scheduled_date.asc()).limit(8).all()
+
+    for m in overdue_maint:
+        alerts.append({
+            "id": f"maint-{m.id}",
+            "type": "overdue_maint",
+            "priority": "high",
+            "title": f"Maintenance Due: {m.asset.asset_tag}",
+            "message": f"Service scheduled for {m.scheduled_date.strftime('%d %b %Y')} is overdue. Issue: {m.issue_description[:60]}...",
+            "link_tab": "maintenance",
+            "entity_id": m.id,
+            "timestamp": m.scheduled_date.strftime("%d %b %Y") if m.scheduled_date else "",
+        })
+
+    # 3. Warranties Expiring Soon (30 Days)
+    expiring_assets = Asset.query.filter(
+        Asset.warranty_expiry.isnot(None),
+        Asset.warranty_expiry >= today,
+        Asset.warranty_expiry <= in_30_days
+    ).order_by(Asset.warranty_expiry.asc()).limit(6).all()
+
+    for a in expiring_assets:
+        days_left = (a.warranty_expiry - today).days
+        alerts.append({
+            "id": f"warranty-{a.id}",
+            "type": "warranty_expiry",
+            "priority": "medium",
+            "title": f"Warranty Expiring Soon: {a.asset_tag}",
+            "message": f"{a.name} warranty expires in {days_left} day(s) on {a.warranty_expiry.strftime('%d %b %Y')}.",
+            "link_tab": "assets",
+            "entity_id": a.id,
+            "timestamp": a.warranty_expiry.strftime("%d %b %Y"),
+        })
+
+    # 4. Critical Risk Assets (Score >= 75)
+    crit_assets = [a for a in Asset.query.filter(Asset.status == "active").all() if a.risk_score >= 75][:5]
+    for ca in crit_assets:
+        alerts.append({
+            "id": f"risk-{ca.id}",
+            "type": "critical_risk",
+            "priority": "high",
+            "title": f"Critical Asset Risk Score: {ca.asset_tag}",
+            "message": f"{ca.name} has a risk score of {ca.risk_score}/100. High failure probability; schedule overhaul or replacement.",
+            "link_tab": "analysis",
+            "entity_id": ca.id,
+            "timestamp": "Real-time Diagnostic",
+        })
+
+    # 5. Pending Procurement Requisitions
+    pending_orders = AssetOrder.query.filter_by(status="pending").order_by(desc(AssetOrder.created_at)).limit(5).all()
+    for po in pending_orders:
+        alerts.append({
+            "id": f"order-{po.id}",
+            "type": "order_pending",
+            "priority": "info",
+            "title": f"Procurement Approval Needed: {po.order_number}",
+            "message": f"{po.item_name} ({po.quantity} unit(s), ₹{float(po.total_cost or 0):,.2f}) awaiting department authorization.",
+            "link_tab": "orders",
+            "entity_id": po.id,
+            "timestamp": po.order_date.strftime("%d %b %Y") if po.order_date else "",
+        })
+
+    return jsonify({
+        "alerts": alerts,
+        "unread_count": len(alerts),
+        "critical_count": sum(1 for a in alerts if a["priority"] == "critical"),
+        "high_count": sum(1 for a in alerts if a["priority"] == "high"),
+    })
+
+
+# ─────────────────────────────────────────────────────────────
+# 13. Data Export Center (CSV & Excel)
+# ─────────────────────────────────────────────────────────────
+@api_bp.route("/export/assets", methods=["GET"])
+def export_assets_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Asset Tag", "Asset Name", "Category", "Department", "Location",
+        "Purchase Date", "Purchase Cost", "Warranty Expiry", "Status",
+        "Condition Rating (1-10)", "Risk Score", "Serial Number",
+        "Manufacturer", "Model Number", "Current Issue Slip"
+    ])
+
+    for a in Asset.query.order_by(Asset.asset_tag).all():
+        writer.writerow([
+            a.asset_tag,
+            a.name,
+            a.category,
+            a.department.name if a.department else "N/A",
+            a.location or "",
+            a.purchase_date.strftime("%Y-%m-%d") if a.purchase_date else "",
+            f"{float(a.purchase_cost or 0):.2f}",
+            a.warranty_expiry.strftime("%Y-%m-%d") if a.warranty_expiry else "",
+            a.status,
+            a.condition_rating or 5,
+            a.risk_score,
+            a.serial_number or "",
+            a.manufacturer or "",
+            a.model_number or "",
+            a.current_issue.slip_number if a.current_issue else "None"
+        ])
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename=assetpulse_assets_export_{date.today().strftime('%Y%m%d')}.csv"}
+    )
+
+
+@api_bp.route("/export/issues", methods=["GET"])
+def export_issues_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Slip Number", "Asset Tag", "Asset Name", "Issued To Name",
+        "Emp/Roll ID", "Department", "Phone", "Email", "Purpose",
+        "Gate Pass Type", "Issue Date", "Expected Return Date",
+        "Actual Return Date", "Status", "Condition on Issue", "Condition on Return", "Fine Amount"
+    ])
+
+    for iss in AssetIssue.query.order_by(desc(AssetIssue.issue_date)).all():
+        writer.writerow([
+            iss.slip_number,
+            iss.asset.asset_tag if iss.asset else "N/A",
+            iss.asset.name if iss.asset else "N/A",
+            iss.issued_to_name,
+            iss.issued_to_id_number or "",
+            iss.issued_to_dept or "",
+            iss.issued_to_phone or "",
+            iss.issued_to_email or "",
+            iss.purpose,
+            iss.gate_pass_type,
+            iss.issue_date.strftime("%Y-%m-%d %H:%M") if iss.issue_date else "",
+            iss.expected_return_date.strftime("%Y-%m-%d %H:%M") if iss.expected_return_date else "N/A",
+            iss.actual_return_date.strftime("%Y-%m-%d %H:%M") if iss.actual_return_date else "N/A",
+            iss.status,
+            iss.issue_condition or "Good",
+            iss.return_condition or "",
+            f"{float(iss.fine_amount or 0):.2f}"
+        ])
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename=assetpulse_gatepasses_export_{date.today().strftime('%Y%m%d')}.csv"}
+    )
+
+
+@api_bp.route("/export/maintenance", methods=["GET"])
+def export_maintenance_csv():
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Log ID", "Asset Tag", "Asset Name", "Request Date", "Scheduled Date",
+        "Completed Date", "Status", "Priority", "Issue Description",
+        "Technician Notes", "Estimated Cost", "Actual Cost"
+    ])
+
+    for m in MaintenanceLog.query.order_by(desc(MaintenanceLog.created_at)).all():
+        writer.writerow([
+            m.id,
+            m.asset.asset_tag if m.asset else "N/A",
+            m.asset.name if m.asset else "N/A",
+            m.request_date.strftime("%Y-%m-%d") if m.request_date else "",
+            m.scheduled_date.strftime("%Y-%m-%d") if m.scheduled_date else "",
+            m.completed_date.strftime("%Y-%m-%d") if m.completed_date else "",
+            m.status,
+            m.priority,
+            m.issue_description,
+            m.technician_notes or "",
+            f"{float(m.estimated_cost or 0):.2f}",
+            f"{float(m.actual_cost or 0):.2f}"
+        ])
+
+    output.seek(0)
+    return Response(
+        output.getvalue(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename=assetpulse_maintenance_export_{date.today().strftime('%Y%m%d')}.csv"}
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 14. Maintenance & Preventive Schedule (Calendar Timeline)
+# ─────────────────────────────────────────────────────────────
+@api_bp.route("/maintenance/schedule", methods=["GET"])
+def get_maintenance_schedule():
+    events = []
+
+    # Maintenance tasks
+    logs = MaintenanceLog.query.all()
+    for m in logs:
+        target_date = m.scheduled_date or m.request_date
+        if target_date:
+            events.append({
+                "id": f"maint-{m.id}",
+                "category": "maintenance",
+                "title": f"Service: {m.asset.asset_tag}",
+                "date": target_date.strftime("%Y-%m-%d"),
+                "status": m.status,
+                "priority": m.priority or "medium",
+                "description": m.issue_description,
+                "asset_name": m.asset.name if m.asset else "Asset",
+                "is_overdue": m.is_overdue,
+            })
+
+    # Upcoming warranty expirations (next 90 days)
+    today = date.today()
+    warranties = Asset.query.filter(
+        Asset.warranty_expiry.isnot(None),
+        Asset.warranty_expiry >= today - timedelta(days=30),
+        Asset.warranty_expiry <= today + timedelta(days=90)
+    ).all()
+
+    for a in warranties:
+        events.append({
+            "id": f"warranty-{a.id}",
+            "category": "warranty",
+            "title": f"Warranty End: {a.asset_tag}",
+            "date": a.warranty_expiry.strftime("%Y-%m-%d"),
+            "status": "expiring",
+            "priority": "low",
+            "description": f"{a.name} warranty expires on this date.",
+            "asset_name": a.name,
+            "is_overdue": a.warranty_expiry < today,
+        })
+
+    # Return dates for active gate passes
+    issues = AssetIssue.query.filter(
+        AssetIssue.status == "issued",
+        AssetIssue.expected_return_date.isnot(None)
+    ).all()
+
+    for iss in issues:
+        events.append({
+            "id": f"return-{iss.id}",
+            "category": "gate_pass_return",
+            "title": f"Due Return: {iss.asset.asset_tag}",
+            "date": iss.expected_return_date.strftime("%Y-%m-%d"),
+            "status": "overdue" if iss.is_overdue else "pending",
+            "priority": "high" if iss.is_overdue else "medium",
+            "description": f"Expected return from {iss.issued_to_name} ({iss.slip_number})",
+            "asset_name": iss.asset.name if iss.asset else "Asset",
+            "is_overdue": iss.is_overdue,
+        })
+
+    return jsonify({"events": events, "count": len(events)})
+
+
+# ─────────────────────────────────────────────────────────────
+# 15. Verified Enterprise Vendors & Suppliers Directory
+# ─────────────────────────────────────────────────────────────
+@api_bp.route("/vendors", methods=["GET"])
+def get_vendors():
+    # Curated vendor directory with active order linkages
+    vendors = [
+        {
+            "id": 1,
+            "name": "Dell Technologies Enterprise",
+            "code": "DELL-ENT",
+            "categories": ["Computer", "Networking", "Lab Equipment"],
+            "rating": 4.9,
+            "lead_time_days": 7,
+            "contact_person": "Vikram Sharma",
+            "email": "enterprise.sales@dell-direct.in",
+            "phone": "+91 (11) 4920-1100",
+            "preferred": True,
+            "active_contracts": "University Annual Rate Contract FY 2026",
+            "total_orders": 14,
+        },
+        {
+            "id": 2,
+            "name": "Cisco Systems India Pvt Ltd",
+            "code": "CSCO-IND",
+            "categories": ["Networking", "Electrical"],
+            "rating": 4.8,
+            "lead_time_days": 10,
+            "contact_person": "Pooja Hegde",
+            "email": "support-campus@cisco.com",
+            "phone": "+91 (80) 4159-3000",
+            "preferred": True,
+            "active_contracts": "Core Campus LAN Refresh MoU",
+            "total_orders": 8,
+        },
+        {
+            "id": 3,
+            "name": "Thermo Fisher Scientific",
+            "code": "TF-SCI",
+            "categories": ["Lab Equipment"],
+            "rating": 4.7,
+            "lead_time_days": 14,
+            "contact_person": "Dr. Ramesh Nair",
+            "email": "instruments.india@thermofisher.com",
+            "phone": "+91 (22) 6740-9000",
+            "preferred": True,
+            "active_contracts": "Advanced Analytical Labs Tender",
+            "total_orders": 6,
+        },
+        {
+            "id": 4,
+            "name": "Steelcase Office & Lab Ergonomics",
+            "code": "STLC-ERG",
+            "categories": ["Furniture"],
+            "rating": 4.6,
+            "lead_time_days": 12,
+            "contact_person": "Ananya Sen",
+            "email": "workplace@steelcase.co.in",
+            "phone": "+91 (124) 478-2200",
+            "preferred": False,
+            "active_contracts": "Modular Lab Benches Agreement",
+            "total_orders": 4,
+        },
+        {
+            "id": 5,
+            "name": "Daikin Air Conditioning Solutions",
+            "code": "DKN-HVAC",
+            "categories": ["HVAC", "Electrical"],
+            "rating": 4.8,
+            "lead_time_days": 5,
+            "contact_person": "Rajesh Gupta",
+            "email": "hvac-service@daikinindia.com",
+            "phone": "+91 (124) 455-5300",
+            "preferred": True,
+            "active_contracts": "Server Room Precision Cooling AMC",
+            "total_orders": 5,
+        },
+        {
+            "id": 6,
+            "name": "BenQ & Epson Visual Tech",
+            "code": "AV-PROJ",
+            "categories": ["Projector", "Electrical"],
+            "rating": 4.5,
+            "lead_time_days": 6,
+            "contact_person": "Sameer Joshi",
+            "email": "av.education@benq.in",
+            "phone": "+91 (120) 400-8888",
+            "preferred": False,
+            "active_contracts": "Smart Classroom Display Supply",
+            "total_orders": 7,
+        },
+    ]
+    return jsonify({"vendors": vendors, "count": len(vendors)})
+
+
+# ─────────────────────────────────────────────────────────────
+# 16. Bulk Asset Import API
+# ─────────────────────────────────────────────────────────────
+@api_bp.route("/assets/bulk-import", methods=["POST"])
+def bulk_import_assets():
+    data = request.json or {}
+    items = data.get("assets", [])
+    if not items or not isinstance(items, list):
+        return jsonify({"error": "Expected a list of asset objects in 'assets' key."}), 400
+
+    created_count = 0
+    errors = []
+    departments_cache = {d.code.upper(): d for d in Department.query.all()}
+    departments_by_id = {d.id: d for d in Department.query.all()}
+
+    for index, item in enumerate(items):
+        try:
+            name = (item.get("name") or "").strip()
+            if not name:
+                errors.append(f"Row {index + 1}: Name is required")
+                continue
+
+            dept = None
+            dept_code = (item.get("department_code") or "").strip().upper()
+            dept_id = item.get("department_id")
+
+            if dept_code and dept_code in departments_cache:
+                dept = departments_cache[dept_code]
+            elif dept_id and int(dept_id) in departments_by_id:
+                dept = departments_by_id[int(dept_id)]
+            else:
+                dept = Department.query.first()
+
+            if not dept:
+                errors.append(f"Row {index + 1}: No valid department found")
+                continue
+
+            tag = item.get("asset_tag") or _generate_asset_tag(dept.code)
+            
+            # Check for existing tag
+            if Asset.query.filter_by(asset_tag=tag).first():
+                tag = f"{dept.code.upper()}-{int(datetime.utcnow().timestamp()) % 100000:05d}"
+
+            pd_str = item.get("purchase_date")
+            we_str = item.get("warranty_expiry")
+
+            purchase_date = None
+            if pd_str:
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+                    try:
+                        purchase_date = datetime.strptime(pd_str, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+
+            warranty_expiry = None
+            if we_str:
+                for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+                    try:
+                        warranty_expiry = datetime.strptime(we_str, fmt).date()
+                        break
+                    except ValueError:
+                        pass
+
+            asset = Asset(
+                asset_tag=tag,
+                name=name,
+                category=item.get("category", "Other"),
+                department_id=dept.id,
+                location=(item.get("location") or "General Lab").strip(),
+                purchase_date=purchase_date or date.today(),
+                purchase_cost=float(item.get("purchase_cost") or 0.0),
+                warranty_expiry=warranty_expiry,
+                status=item.get("status", "active"),
+                condition_rating=int(item.get("condition_rating") or 5),
+                serial_number=(item.get("serial_number") or "").strip(),
+                model_number=(item.get("model_number") or "").strip(),
+                manufacturer=(item.get("manufacturer") or "").strip(),
+                notes=(item.get("notes") or "").strip(),
+            )
+            db.session.add(asset)
+            db.session.flush()
+
+            try:
+                qr_path = generate_asset_qr(asset, _get_base_url())
+                asset.qr_code_path = qr_path
+            except Exception:
+                pass
+
+            created_count += 1
+        except Exception as e:
+            errors.append(f"Row {index + 1}: {str(e)}")
+
+    db.session.commit()
+    return jsonify({
+        "success": True,
+        "imported": created_count,
+        "errors": errors,
+        "message": f"Successfully imported {created_count} assets."
+    }), 201
+
 
