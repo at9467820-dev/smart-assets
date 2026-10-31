@@ -1095,12 +1095,15 @@ def get_report_labels():
 @api_bp.route("/auth/login", methods=["POST"])
 def auth_login():
     data = request.json or request.form
-    username = data.get("username", "").strip()
-    password = data.get("password", "")
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or not password:
+        return jsonify({"error": "Please enter both username/email and password"}), 400
 
     user = User.query.filter(or_(User.username == username, User.email == username)).first()
     if not user or not user.check_password(password):
-        return jsonify({"error": "Invalid username or password"}), 401
+        return jsonify({"error": "Invalid username/email or password. Access denied."}), 401
 
     user.last_login = datetime.utcnow()
     db.session.add(ActivityLog(
@@ -1115,6 +1118,7 @@ def auth_login():
 
     return jsonify({
         "success": True,
+        "message": f"Welcome back, {user.full_name or user.username}!",
         "user": {
             "id": user.id,
             "username": user.username,
@@ -1130,33 +1134,97 @@ def auth_login():
 @api_bp.route("/auth/register", methods=["POST"])
 def auth_register():
     data = request.json or request.form
-    username = data.get("username", "").strip()
-    email = data.get("email", "").strip()
-    password = data.get("password", "")
-    full_name = data.get("full_name", "").strip()
+    username = (data.get("username") or "").strip()
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+    full_name = (data.get("full_name") or "").strip()
     dept_id = data.get("department_id")
     role = data.get("role", "department")
 
     if not username or not email or not password:
-        return jsonify({"error": "Missing required fields"}), 400
+        return jsonify({"error": "Username, Email, and Password are all required"}), 400
+
+    if len(password) < 6:
+        return jsonify({"error": "Password must be at least 6 characters long"}), 400
 
     if User.query.filter_by(username=username).first():
-        return jsonify({"error": "Username already exists"}), 400
+        return jsonify({"error": f"Username '{username}' is already registered. Please choose another or sign in."}), 400
     if User.query.filter_by(email=email).first():
-        return jsonify({"error": "Email already exists"}), 400
+        return jsonify({"error": f"Email '{email}' is already in use. Please sign in or use another email."}), 400
+
+    dept = None
+    if dept_id is not None and str(dept_id).strip():
+        try:
+            dept = Department.query.get(int(dept_id))
+        except (ValueError, TypeError):
+            pass
+    if not dept and data.get("department"):
+        d_val = str(data.get("department")).strip()
+        dept = Department.query.filter(or_(Department.name.ilike(d_val), Department.code.ilike(d_val))).first()
+    if not dept and data.get("department_name"):
+        dept = Department.query.filter(Department.name.ilike(str(data.get("department_name")).strip())).first()
 
     user = User(
         username=username,
         email=email,
         full_name=full_name or username,
-        department_id=dept_id if dept_id else None,
+        department_id=dept.id if dept else None,
         role=role,
     )
     user.set_password(password)
     db.session.add(user)
     db.session.commit()
 
-    return jsonify({"success": True, "message": "Account created successfully!"}), 201
+    return jsonify({
+        "success": True,
+        "message": f"Account '{username}' created successfully! You can now sign in.",
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": user.role,
+        }
+    }), 201
+
+
+@api_bp.route("/auth/forgot-password", methods=["POST"])
+def auth_forgot_password():
+    data = request.json or request.form
+    target = (data.get("email") or data.get("username") or "").strip()
+    if not target:
+        return jsonify({"error": "Please provide your campus email or username"}), 400
+
+    user = User.query.filter(or_(User.email == target, User.username == target)).first()
+    if not user:
+        return jsonify({"error": f"No account found matching '{target}'"}), 404
+
+    return jsonify({
+        "success": True,
+        "username": user.username,
+        "message": f"Password reset instructions for {user.username} ({user.email}) generated successfully."
+    })
+
+
+@api_bp.route("/auth/reset-password", methods=["POST"])
+def auth_reset_password():
+    data = request.json or request.form
+    username = (data.get("username") or "").strip()
+    new_password = data.get("new_password") or data.get("password") or ""
+
+    if not username or not new_password:
+        return jsonify({"error": "Username and new password are required"}), 400
+
+    if len(new_password) < 6:
+        return jsonify({"error": "New password must be at least 6 characters long"}), 400
+
+    user = User.query.filter(or_(User.username == username, User.email == username)).first()
+    if not user:
+        return jsonify({"error": f"User '{username}' not found"}), 404
+
+    user.set_password(new_password)
+    db.session.commit()
+    return jsonify({"success": True, "message": "Password updated successfully! Please sign in with your new credentials."})
 
 
 @api_bp.route("/auth/logs", methods=["GET"])
