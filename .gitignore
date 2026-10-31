@@ -1,0 +1,31 @@
+# Environment variables (NEVER commit secrets to Git)
+.env
+.env.*
+!.env.example
+
+# Python cache and byte-compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Database files
+*.db
+*.sqlite3
+
+# Uploads & generated assets
+app/static/uploads/*
+!app/static/uploads/.gitkeep
+app/static/qrcodes/*
+!app/static/qrcodes/.gitkeep
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+

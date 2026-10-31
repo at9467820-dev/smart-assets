@@ -40,17 +40,40 @@ class DevelopmentConfig(Config):
         "DATABASE_URL",
         f"sqlite:///{os.path.join(BASE_DIR, 'assetpulse.db')}",
     )
+    if _db_url and _db_url.startswith("mysql://"):
+        _db_url = _db_url.replace("mysql://", "mysql+pymysql://", 1)
     # If a bare relative sqlite URL is given (e.g. sqlite:///assetpulse.db),
     # resolve it to an absolute path inside BASE_DIR so it always finds the db.
     if _db_url and _db_url.startswith("sqlite:///") and not os.path.isabs(_db_url[10:]):
         _db_url = f"sqlite:///{os.path.join(BASE_DIR, _db_url[10:])}"
     SQLALCHEMY_DATABASE_URI = _db_url
 
+    # Auto-enable SSL connect_args for MySQL connections (e.g. Aiven Cloud)
+    _dev_engine_opts = dict(Config.SQLALCHEMY_ENGINE_OPTIONS)
+    if _db_url and "mysql" in _db_url:
+        _dev_engine_opts["connect_args"] = {"ssl": {}}
+    SQLALCHEMY_ENGINE_OPTIONS = _dev_engine_opts
+
 
 class ProductionConfig(Config):
     DEBUG = False
-    SQLALCHEMY_DATABASE_URI = os.environ.get("DATABASE_URL")
-    WTF_CSRF_ENABLED = True
+    _db_url = os.environ.get(
+        "DATABASE_URL",
+        f"sqlite:///{os.path.join(BASE_DIR, 'assetpulse.db')}",
+    )
+    if _db_url and _db_url.startswith("mysql://"):
+        _db_url = _db_url.replace("mysql://", "mysql+pymysql://", 1)
+    elif _db_url and _db_url.startswith("postgres://"):
+        _db_url = _db_url.replace("postgres://", "postgresql://", 1)
+    elif _db_url and _db_url.startswith("sqlite:///") and not os.path.isabs(_db_url[10:]):
+        _db_url = f"sqlite:///{os.path.join(BASE_DIR, _db_url[10:])}"
+    SQLALCHEMY_DATABASE_URI = _db_url
+    WTF_CSRF_ENABLED = False
+
+    _prod_engine_opts = dict(Config.SQLALCHEMY_ENGINE_OPTIONS)
+    if _db_url and "mysql" in _db_url:
+        _prod_engine_opts["connect_args"] = {"ssl": {}}
+    SQLALCHEMY_ENGINE_OPTIONS = _prod_engine_opts
 
 
 class TestingConfig(Config):
