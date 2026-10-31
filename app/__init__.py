@@ -50,6 +50,14 @@ def create_app(config_name: str = None) -> Flask:
     def load_user(user_id):
         return User.query.get(int(user_id))
 
+    # ── Ensure tables exist and auto-seed if database is fresh ──
+    with app.app_context():
+        try:
+            from seed import auto_seed_if_empty
+            auto_seed_if_empty()
+        except Exception as e:
+            print(f"[NOTICE] Startup DB notice: {e}")
+
     # ── Serve Pure React SPA (Priority Routing) ────────────────
     if os.path.exists(_FRONTEND_DIST):
         from flask import send_from_directory, abort

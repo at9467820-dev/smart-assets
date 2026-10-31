@@ -28,14 +28,11 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 from dotenv import load_dotenv
 load_dotenv()
 
-from app import create_app
 from app.extensions import db
 from app.models import (
     Department, User, Asset, MaintenanceLog, AllocationHistory, BudgetEstimate, ActivityLog,
     AssetIssue, AssetOrder
 )
-
-app = create_app("development")
 
 # ── Helpers ────────────────────────────────────────────────────────
 def rand_date(start_year=2018, end_year=2024):
@@ -115,10 +112,11 @@ ASSETS_SEED = [
     ("Dell Vostro Admin Laptop",   "Computer",     "ADMIN","Principal's Office",  55000,  "2023-04-15", 3, "active",   9),
 ]
 
-def seed():
-    with app.app_context():
-        print("🌱 Dropping and recreating all tables…")
-        db.drop_all()
+def seed(drop_first=True):
+    with db.session.no_autoflush:
+        if drop_first:
+            print("🌱 Dropping and recreating all tables…")
+            db.drop_all()
         db.create_all()
 
         # ── Departments ───────────────────────────────────────────
@@ -438,6 +436,21 @@ def seed():
         print("   Maintenance: maint1 / maint123")
 
 
+def auto_seed_if_empty():
+    from app.models import User
+    try:
+        db.create_all()
+        if not User.query.first():
+            print("🌱 Empty database detected. Populating initial seed data...")
+            seed(drop_first=False)
+            print("✅ Initial data seeded successfully.")
+    except Exception as e:
+        print(f"⚠️ Auto-seed notice: {e}")
+
+
 if __name__ == "__main__":
-    seed()
+    from app import create_app
+    cli_app = create_app("development")
+    with cli_app.app_context():
+        seed(drop_first=True)
 

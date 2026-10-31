@@ -13,8 +13,9 @@ venv/
 env/
 ENV/
 
-# Database files
+# Database files (allow default verified seed db)
 *.db
+!assetpulse.db
 *.sqlite3
 
 # Uploads & generated assets
