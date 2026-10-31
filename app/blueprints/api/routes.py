@@ -202,6 +202,17 @@ def get_assets():
             "department_id": a.department_id,
             "department_name": a.department.name if a.department else "N/A",
             "department_code": a.department.code if a.department else "N/A",
+            "department": {
+                "id": a.department.id,
+                "name": a.department.name,
+                "code": a.department.code,
+            } if a.department else None,
+            "department_code": a.department.code if a.department else "N/A",
+            "department": {
+                "id": a.department.id,
+                "name": a.department.name,
+                "code": a.department.code,
+            } if a.department else None,
             "location": a.location or "",
             "purchase_date": a.purchase_date.strftime("%Y-%m-%d") if a.purchase_date else None,
             "purchase_cost": float(a.purchase_cost or 0),
@@ -276,6 +287,12 @@ def get_asset_detail(asset_id):
             "category": a.category,
             "department_id": a.department_id,
             "department_name": a.department.name if a.department else "N/A",
+            "department_code": a.department.code if a.department else "N/A",
+            "department": {
+                "id": a.department.id,
+                "name": a.department.name,
+                "code": a.department.code,
+            } if a.department else None,
             "location": a.location or "",
             "purchase_date": a.purchase_date.strftime("%Y-%m-%d") if a.purchase_date else None,
             "purchase_cost": float(a.purchase_cost or 0),
@@ -305,9 +322,22 @@ def get_asset_detail(asset_id):
 def create_asset():
     data = request.json or request.form
     dept_id = data.get("department_id")
-    dept = Department.query.get(dept_id)
+    dept = None
+    if dept_id is not None and str(dept_id).strip():
+        try:
+            dept = Department.query.get(int(dept_id))
+        except (ValueError, TypeError):
+            pass
+    if not dept and data.get("department"):
+        d_val = str(data.get("department")).strip()
+        dept = Department.query.filter(or_(Department.name.ilike(d_val), Department.code.ilike(d_val))).first()
+    if not dept and data.get("department_name"):
+        d_val = str(data.get("department_name")).strip()
+        dept = Department.query.filter(Department.name.ilike(d_val)).first()
     if not dept:
-        return jsonify({"error": "Invalid department"}), 400
+        dept = Department.query.first()
+    if not dept:
+        return jsonify({"error": "No valid department found in database"}), 400
 
     tag = data.get("asset_tag") or _generate_asset_tag(dept.code)
     pd_str = data.get("purchase_date")
@@ -317,7 +347,7 @@ def create_asset():
         asset_tag=tag,
         name=data.get("name", "").strip(),
         category=data.get("category", "Other"),
-        department_id=dept_id,
+        department_id=dept.id,
         location=data.get("location", "").strip(),
         purchase_date=datetime.strptime(pd_str, "%Y-%m-%d").date() if pd_str else None,
         purchase_cost=float(data.get("purchase_cost") or 0.0),
@@ -452,11 +482,19 @@ def get_issues():
 def create_issue():
     data = request.json or request.form
     asset_id = data.get("asset_id")
-    asset = Asset.query.get_or_404(asset_id)
+    if not asset_id:
+        return jsonify({"error": "Please select an asset to issue"}), 400
+    try:
+        asset = Asset.query.get(int(asset_id))
+    except (ValueError, TypeError):
+        asset = None
+    if not asset:
+        return jsonify({"error": f"Asset with ID '{asset_id}' not found"}), 404
 
     if asset.is_currently_issued:
+        slip = asset.current_issue.slip_number if asset.current_issue else "Active Gate Pass"
         return jsonify({
-            "error": f"Asset {asset.asset_tag} is already issued (Slip: {asset.current_issue.slip_number})"
+            "error": f"Asset {asset.asset_tag} ({asset.name}) is currently issued on voucher {slip}."
         }), 400
 
     return_dt_str = data.get("expected_return_date")
@@ -598,7 +636,14 @@ def get_maintenance():
 def create_maintenance():
     data = request.json or request.form
     asset_id = data.get("asset_id")
-    asset = Asset.query.get_or_404(asset_id)
+    if not asset_id:
+        return jsonify({"error": "Please select an asset for maintenance"}), 400
+    try:
+        asset = Asset.query.get(int(asset_id))
+    except (ValueError, TypeError):
+        asset = None
+    if not asset:
+        return jsonify({"error": f"Asset with ID '{asset_id}' not found"}), 404
 
     sched_str = data.get("scheduled_date")
     sched_dt = datetime.strptime(sched_str, "%Y-%m-%d").date() if sched_str else None
@@ -659,12 +704,22 @@ def create_order():
     admin_user = User.query.filter_by(role="admin").first()
     user_id = admin_user.id if admin_user else 1
 
+    dept_id = data.get("department_id")
+    dept = None
+    if dept_id is not None and str(dept_id).strip():
+        try:
+            dept = Department.query.get(int(dept_id))
+        except (ValueError, TypeError):
+            pass
+    if not dept:
+        dept = Department.query.first()
+
     order_no = _generate_order_number()
     order = AssetOrder(
         order_number=order_no,
         item_name=data.get("item_name", "").strip(),
         category=data.get("category", "Other"),
-        department_id=int(data.get("department_id") or 1),
+        department_id=dept.id if dept else 1,
         requested_by_id=user_id,
         quantity=qty,
         estimated_unit_cost=unit_cost,
@@ -837,7 +892,10 @@ def update_department_budget():
     data = request.json or request.form
     dept_id = data.get("department_id")
     amount = float(data.get("budget_allocated") or 0.0)
-    dept = Department.query.get_or_404(dept_id)
+    try:
+        dept = Department.query.get_or_404(int(dept_id))
+    except (ValueError, TypeError):
+        return jsonify({"error": "Invalid department ID format"}), 400
     dept.budget_allocated = amount
     db.session.commit()
     return jsonify({"success": True, "message": f"Budget for {dept.name} updated to ₹{amount:,.2f}"})
@@ -873,9 +931,21 @@ def get_allocations():
 def create_allocation():
     data = request.json or request.form
     asset_id = data.get("asset_id")
-    asset = Asset.query.get_or_404(asset_id)
+    if not asset_id:
+        return jsonify({"error": "Asset ID is required"}), 400
+    try:
+        asset = Asset.query.get(int(asset_id))
+    except (ValueError, TypeError):
+        asset = None
+    if not asset:
+        return jsonify({"error": f"Asset with ID '{asset_id}' not found"}), 404
     
     to_dept_id = data.get("to_department_id")
+    if to_dept_id:
+        try:
+            to_dept_id = int(to_dept_id)
+        except (ValueError, TypeError):
+            to_dept_id = None
     to_user_id = data.get("to_user_id")
     reason = data.get("reason", "").strip()
     notes = data.get("notes", "").strip()
